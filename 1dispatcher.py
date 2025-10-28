@@ -149,6 +149,10 @@ async def workers_events_listener(redis: aioredis.Redis):
                         else:
                             await redis.srem(WORKERS_AVAILABLE_SET, worker_id)
 
+                elif event == "task_received":
+                    task_id = event_data.get("task_id")
+                    log.info(f"Воркер '{worker_id}' подтвердил получение задачи {task_id}.")
+                
                 elif event == "task_complete":
                     log.info(f"Воркер '{worker_id}' сообщил о завершении задачи.")
                     
