@@ -477,11 +477,12 @@ async def video_monitoring_loop(page, redis_client):
                 data_index = await div.get_attribute('data-index')
                 log.info(f"\n--- Проверка видео #{i+1} (data-index: {data_index}) ---")
                 try:
-                    await save_debug_snapshot(page, prefix="violation_check")  # Для отладки
+                    
                     violation_text_element = div.locator('div:has-text("This content may violate")')
                     if await violation_text_element.is_visible(timeout=3000):
                         log.error(f"ОБНАРУЖЕНИЕ НАРУШЕНИЯ | Обнаружен блок с нарушением правил на data-index={data_index}.")
-
+                        await save_debug_snapshot(page, prefix="violation_check")  # Для отладки
+                        
                         prompt_element = div.locator('div.text-pretty')
                         if await prompt_element.count() > 0:
                             violating_prompt = await prompt_element.inner_text()
@@ -1003,9 +1004,6 @@ async def run_worker():
                 prompt_textarea = page.locator('textarea[placeholder="Describe your video..."]')
                 await prompt_textarea.wait_for(state="visible", timeout=20000)
                 log.info("АУТЕНТИФИКАЦИЯ |\nИнтерфейс готов к работе!")
-                await r.publish(EVENTS_CHANNEL, json.dumps({"event": "ready", "worker_id": WORKER_ID}))
-                log.info(f"ЗАПУСК | Воркер {WORKER_ID} отправил сообщение о готовности в канал {EVENTS_CHANNEL}")
-
                 await save_debug_snapshot(page, prefix="Succes_interface")
             except Exception as e:
                 await save_debug_snapshot(page, prefix="error")
@@ -1021,11 +1019,26 @@ async def run_worker():
             raise GracefulShutdown()
             # sys.exit(1)
     
-        log.info(f"ЗАПУСК | Настройка завершена. Воркер {WORKER_ID} слушает свой персональный канал: {PERSONAL_TASK_CHANNEL}")
-        await asyncio.sleep(2)
-
+        log.info(f"ЗАПУСК | Подписываюсь на персональный канал: {PERSONAL_TASK_CHANNEL}")
+        
         async with r.pubsub() as pubsub:
             await pubsub.subscribe(PERSONAL_TASK_CHANNEL)
+            log.info(f"ЗАПУСК | Успешно подписался на канал {PERSONAL_TASK_CHANNEL}")
+            
+            await r.publish(EVENTS_CHANNEL, json.dumps({"event": "ready", "worker_id": WORKER_ID}))
+            log.info(f"ЗАПУСК | Воркер {WORKER_ID} отправил сообщение о готовности в канал {EVENTS_CHANNEL}")
+            
+            processing_key = f"processing:{WORKER_ID}"
+            pending_tasks_in_redis = await r.lrange(processing_key, 0, -1)
+            if pending_tasks_in_redis:
+                log.warning(f"ЗАПУСК | Обнаружено {len(pending_tasks_in_redis)} задач в processing list. Возвращаю их в очередь для переназначения.")
+                for task_json in pending_tasks_in_redis:
+                    await r.lpush("queue:p1:returned", task_json)
+                    log.info(f"ЗАПУСК | Задача возвращена в приоритетную очередь: {task_json}")
+                await r.delete(processing_key)
+                log.info(f"ЗАПУСК | Processing list очищен. Готов к новым задачам.")
+            
+            await asyncio.sleep(1)
             async for msg in pubsub.listen():
                 if msg is None or msg.get("type") != "message":
                     continue
@@ -1056,6 +1069,14 @@ async def run_worker():
                     if not prompt or not user_id or not task_json:
                         log.warning(f"ГЕНЕРАЦИЯ |\nНеполные данные для generate_video: {data}")
                         continue
+
+                    log.info(f"ГЕНЕРАЦИЯ | Получена задача {task_id} для user_id ({user_id}). Отправляю подтверждение...")
+                    await r.publish(EVENTS_CHANNEL, json.dumps({
+                        "event": "task_received",
+                        "worker_id": WORKER_ID,
+                        "task_id": task_id,
+                        "ts": time.time()
+                    }))
 
                     submit_ok = await submit_prompt_and_generate(page, prompt, task_id, r, user_id)
                     
